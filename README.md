@@ -8,6 +8,15 @@
 
 The first image shows the installed desktop shortcut; the second shows the local Harness web UI opened with the launcher.
 
+
+## Screenshots
+
+![HANSKA AI Launcher desktop shortcut](assets/launcher-desktop-shortcut.png)
+
+![DeepSeek Harness open in the browser after launching with HANSKA AI Launcher](assets/harness-with-launcher.png)
+
+The first image shows the installed desktop shortcut; the second shows the local Harness web UI opened with the launcher.
+
 A small Ubuntu desktop launcher for an existing local installation of the DeepSeek Harness web UI. It uses the user's existing NVM and offline `npx` cache; it does not install Node.js, Harness, Ollama, or npm packages.
 
 ## What it does
