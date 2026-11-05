@@ -1,0 +1,144 @@
+#!/usr/bin/python3
+"""Local launcher; credentials never enter browser command arguments."""
+import fcntl
+import http.client
+import http.server
+import os
+from pathlib import Path
+import re
+import secrets
+import socket
+import subprocess
+import sys
+import time
+from urllib.parse import urlsplit, parse_qs
+
+BASE = 'http://127.0.0.1:3080/'
+
+def error(message):
+    print('HANSKA AI: ' + message, file=sys.stderr)
+    try:
+        subprocess.run(['zenity', '--error', '--title=HANSKA AI Launcher',
+                        '--text=' + message], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    raise SystemExit(1)
+
+def occupied():
+    try:
+        with socket.create_connection(('127.0.0.1', 3080), timeout=1):
+            return True
+    except OSError:
+        return False
+
+def valid(url):
+    p = urlsplit(url)
+    if p.scheme != 'http' or p.hostname not in ('127.0.0.1', 'localhost') or p.port != 3080:
+        return False
+    if p.username or p.password or p.path not in ('', '/') or not parse_qs(p.query).get('token'):
+        return False
+    try:
+        conn = http.client.HTTPConnection('127.0.0.1', 3080, timeout=2)
+        conn.request('GET', '/?' + p.query)
+        response = conn.getresponse()
+        # Authentication exchanges the launch token for a browser cookie.
+        ok = response.status in (302, 303, 307) and bool(response.getheader('Set-Cookie'))
+        conn.close()
+        return ok
+    except (OSError, http.client.HTTPException):
+        return False
+
+def handoff(url):
+    nonce = '/' + secrets.token_urlsafe(32)
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+        def do_GET(self):
+            if self.path != nonce or self.headers.get('Host') != authority:
+                self.send_error(404)
+                return
+            self.send_response(303)
+            self.send_header('Location', url)
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Referrer-Policy', 'no-referrer')
+            self.end_headers()
+            self.server.delivered = True
+    with http.server.HTTPServer(('127.0.0.1', 0), Handler) as server:
+        authority = '127.0.0.1:' + str(server.server_port)
+        server.timeout = 1
+        server.delivered = False
+        try:
+            opener = subprocess.Popen(['xdg-open', 'http://' + authority + nonce],
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError:
+            error('No se pudo abrir el navegador. Comprueba xdg-open.')
+        deadline = time.monotonic() + 45
+        while not server.delivered and time.monotonic() < deadline:
+            server.handle_request()
+            if opener.poll() not in (None, 0):
+                break
+        if not server.delivered:
+            error('El navegador no abrió el enlace en 45 segundos. Vuelve a pulsar el acceso directo.')
+
+def main():
+    if os.getuid() == 0:
+        error('Abre el lanzador como tu usuario habitual, sin sudo.')
+    os.umask(0o077)
+    state = Path.home() / '.local/state/hanska-ai-launcher'
+    state.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if state.is_symlink() or state.stat().st_uid != os.getuid():
+        error('El directorio privado del lanzador no es válido.')
+    state.chmod(0o700)
+    with open(state / 'launcher.lock', 'a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return
+        log = state / 'server.log'
+        cached = state / 'launch-url'
+        url = cached.read_text().strip() if cached.exists() else ''
+        if occupied():
+            if not url and log.exists():
+                text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', log.read_bytes()[-262144:].decode('utf-8', 'replace'))
+                for item in reversed(re.findall(r'http://(?:127\.0\.0\.1|localhost):3080/[^\s<>"\x1b]*', text)):
+                    if valid(item):
+                        url = item
+                        cached.write_text(url)
+                        break
+            if url and valid(url):
+                handoff(url)
+                return
+            error('El puerto 3080 ya está ocupado. No se inició otro servidor. '
+                  'Si iniciaste Harness en una terminal, abre su URL autenticada original. '
+                  'Para usar este acceso directo, detén manualmente ese Harness y vuelve a abrirlo aquí.')
+        if not (Path.home() / 'hanska-dsh-test').is_dir():
+            error('No existe ~/hanska-dsh-test. No se ha cambiado tu instalación.')
+        cached.unlink(missing_ok=True)
+        with open(log, 'wb') as output:
+            proc = subprocess.Popen(['/usr/lib/hanska-ai-launcher/start'],
+                                    stdin=subprocess.DEVNULL, stdout=output, stderr=output,
+                                    start_new_session=True, close_fds=True)
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline:
+            text = log.read_bytes()[-262144:].decode('utf-8', 'replace')
+            text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', text)
+            for candidate in reversed(re.findall(r'http://(?:127\.0\.0\.1|localhost):3080/[^\s<>"\x1b]*', text)):
+                candidate = candidate.rstrip("').,;")
+                if valid(candidate):
+                    cached.write_text(candidate)
+                    handoff(candidate)
+                    return
+            if proc.poll() is not None:
+                error('Harness terminó antes de estar listo. Comprueba NVM y que el paquete '
+                      '@deepseek-ai/dsh ya esté instalado o en la caché de npx. '
+                      'Diagnóstico privado: ~/.local/state/hanska-ai-launcher/server.log (puede contener el token; no lo compartas).')
+            time.sleep(0.5)
+        error('Harness tardó más de 90 segundos. No se lanzó otro servidor ni se detuvo el existente. '
+              'Espera y vuelve a abrir el acceso directo.')
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (OSError, ValueError, http.client.HTTPException):
+        error('No se pudo completar el inicio. Revisa los permisos y la instalación existente de Harness.')
