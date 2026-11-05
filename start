@@ -1,0 +1,16 @@
+#!/bin/bash
+set -e
+cd -- "$HOME/hanska-dsh-test"
+export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+if [ -s "$NVM_DIR/nvm.sh" ]; then
+    . "$NVM_DIR/nvm.sh" --no-use
+    if [ -f .nvmrc ]; then
+        nvm use --silent >/dev/null
+    else
+        nvm use --silent default >/dev/null
+    fi
+fi
+command -v node >/dev/null
+command -v npx >/dev/null
+# Never download a missing package or update the user's installed Harness.
+exec npx --offline --no-install @deepseek-ai/dsh web --no-open
